@@ -8,7 +8,10 @@ Secure Software Engineering Project: Fine-tuning large language models for softw
 ## Model used:
 - Microsoft codeBERT-base
 
-## New plan for project
+## Code
+- train_bigvul.py: This is a python script that I can run to fine-tune the CodeBERT-Base model on the Big-Vul Dataset. This code was originally done in a Jupyter notebook, but was converted to a script for ease of fine-tuning. This is currently the only script I have, but it will be fairly straightforward to copy this code to fine-tune on the Juliet training set.
+
+## Project Reframing
 
 I am reframing the project to focus solely on Reserach Question #3:
 - What are the Strengths and weaknesses of LLM-based approaches across datasets (synthetic vs. real-world) and vulnerability types?
