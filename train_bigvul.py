@@ -4,34 +4,31 @@ from transformers import (
     RobertaTokenizer,
     RobertaForSequenceClassification,
     Trainer,
-    TrainingArguments
+    TrainingArguments,
+    DataCollatorWithPadding
 )
+from peft import get_peft_model, LoraConfig, TaskType
 
-# --- 1. LOAD DATASETS (from cache) ---
+# --- 1. CONFIGURATION ---
+MODEL_NAME = "microsoft/codebert-base"
+BATCH_SIZE = 16  # Increased from 8 (LoRA uses less memory!)
+LEARNING_RATE = 2e-4 # LoRA usually needs a slightly higher LR than full fine-tuning
+EPOCHS = 1
+
+# --- 2. LOAD DATASETS (from cache) ---
 print("Loading datasets from cache...")
 bigvul_dataset = load_dataset("bstee615/bigvul", "default")
 
-
-# --- 2. LOAD TOKENIZER AND MODEL (from cache) ---
-model_name = "microsoft/codebert-base"
-print(f"Loading tokenizer and model for '{model_name}'...")
-
-tokenizer = RobertaTokenizer.from_pretrained(model_name)
-model = RobertaForSequenceClassification.from_pretrained(model_name, num_labels=2)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-print(f"--- Model loaded and moved to {device} ---")
-
-
-# --- 3. PREPARE BIG-VUL DATASET ---
-
-# Rename 'func_before' to 'code'
+# --- 3. PREPARE DATASET (The Fix from before) ---
 print("Renaming 'func_before' column to 'code'...")
 bigvul_dataset = bigvul_dataset.rename_column("func_before", "code")
 
-# Define tokenization function
+# Load Tokenizer
+print(f"Loading tokenizer for '{MODEL_NAME}'...")
+tokenizer = RobertaTokenizer.from_pretrained(MODEL_NAME)
+
 def tokenize_function(examples):
+    # We truncate to 512. 
     return tokenizer(
         examples["code"],
         padding="max_length",
@@ -39,11 +36,13 @@ def tokenize_function(examples):
         max_length=512
     )
 
-print("Tokenizing Big-Vul dataset...")
+print("Tokenizing Big-Vul dataset (this part still takes a moment)...")
+# Process training set
 tokenized_bigvul_train = bigvul_dataset["train"].map(tokenize_function, batched=True)
+# Process validation set
 tokenized_bigvul_val = bigvul_dataset["validation"].map(tokenize_function, batched=True)
 
-# Remove columns I don't need to save memory
+# Clean up columns
 columns_to_remove = [
     'code', 'CVE ID', 'CVE Page', 'CWE ID', 'codeLink', 'commit_id', 
     'commit_message', 'func_after', 'lang', 'project'
@@ -51,37 +50,57 @@ columns_to_remove = [
 tokenized_bigvul_train = tokenized_bigvul_train.remove_columns(columns_to_remove)
 tokenized_bigvul_val = tokenized_bigvul_val.remove_columns(columns_to_remove)
 
-# Rename the 'vul' column to 'labels'
+# Rename labels
 print("Renaming 'vul' column to 'labels'...")
 tokenized_bigvul_train = tokenized_bigvul_train.rename_column("vul", "labels")
 tokenized_bigvul_val = tokenized_bigvul_val.rename_column("vul", "labels")
 
-# Set the format to torch tensors
+# Set format
 tokenized_bigvul_train.set_format("torch")
 tokenized_bigvul_val.set_format("torch")
 
-print("--- Tokenization Complete ---")
+
+# --- 4. LOAD MODEL & APPLY LoRA ---
+print(f"Loading base model '{MODEL_NAME}'...")
+model = RobertaForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+
+# Define LoRA Config
+peft_config = LoraConfig(
+    task_type=TaskType.SEQ_CLS, # Sequence Classification
+    inference_mode=False,
+    r=8,                        # Rank (Size of adapters). 8 is standard.
+    lora_alpha=32,              # Alpha scaling
+    lora_dropout=0.1,
+    target_modules=["query", "value"] # Apply LoRA to attention layers
+)
+
+# Wrap the model
+model = get_peft_model(model, peft_config)
+model.print_trainable_parameters() 
+# ^ This will print how many params we are training. It should be < 1%.
+
+# Move to GPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
 
 
-# --- 4. SET UP AND RUN THE TRAINER ---
-
-# Define the training arguments
+# --- 5. TRAINING ARGUMENTS ---
 training_args = TrainingArguments(
-    output_dir="./results-bigvul",
-    num_train_epochs=1,
-    per_device_train_batch_size=8,
-    per_device_eval_batch_size=8,
-    warmup_steps=500,
+    output_dir="./results-bigvul-lora",
+    num_train_epochs=EPOCHS,
+    per_device_train_batch_size=BATCH_SIZE,
+    per_device_eval_batch_size=BATCH_SIZE,
+    learning_rate=LEARNING_RATE,
     weight_decay=0.01,
-    logging_dir="./logs-bigvul",
+    logging_dir="./logs-bigvul-lora",
     logging_steps=100,
     eval_strategy="steps",
     eval_steps=500,
     save_steps=500,
+    fp16=True,
     load_best_model_at_end=True,
 )
 
-# Create the Trainer object
 trainer = Trainer(
     model=model,
     args=training_args,
@@ -89,11 +108,12 @@ trainer = Trainer(
     eval_dataset=tokenized_bigvul_val,
 )
 
-print("--- Starting Fine-Tuning on Big-Vul... ---")
+print("--- Starting Fast Fine-Tuning (LoRA + FP16)... ---")
 trainer.train()
 
 print("--- Training Complete ---")
 
-trainer.save_model("./model-trained-on-bigvul")
-tokenizer.save_pretrained("./model-trained-on-bigvul")
-print("--- Best model saved to ./model-trained-on-bigvul ---")
+# Save the adapter model
+model.save_pretrained("./model-bigvul-lora")
+tokenizer.save_pretrained("./model-bigvul-lora")
+print("--- LoRA adapters saved to ./model-bigvul-lora ---")
