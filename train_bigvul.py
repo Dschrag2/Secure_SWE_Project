@@ -71,7 +71,8 @@ peft_config = LoraConfig(
     r=8,                        # Rank (Size of adapters). 8 is standard.
     lora_alpha=32,              # Alpha scaling
     lora_dropout=0.1,
-    target_modules=["query", "value"] # Apply LoRA to attention layers
+    target_modules=["query", "value"], # Apply LoRA to attention layers
+    modules_to_save=["classifier"]
 )
 
 # Wrap the model

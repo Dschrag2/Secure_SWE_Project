@@ -94,7 +94,8 @@ peft_config = LoraConfig(
     r=8,
     lora_alpha=32,
     lora_dropout=0.1,
-    target_modules=["query", "value"]
+    target_modules=["query", "value"],
+    modules_to_save=["classifier"]
 )
 
 model = get_peft_model(model, peft_config)
