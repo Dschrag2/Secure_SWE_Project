@@ -7,10 +7,12 @@ from transformers import (
     TrainingArguments
 )
 from peft import get_peft_model, LoraConfig, TaskType
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
 
 # --- 1. CONFIGURATION ---
 MODEL_NAME = "microsoft/codebert-base"
-BATCH_SIZE = 16
+BATCH_SIZE = 24  # Optimized for RTX 3060 (6GB) - balances speed and memory
 LEARNING_RATE = 2e-4
 EPOCHS = 1
 
@@ -83,10 +85,46 @@ tokenized_juliet_val = tokenized_juliet_val.remove_columns(["code"])
 tokenized_juliet_train.set_format("torch")
 tokenized_juliet_val.set_format("torch")
 
+# --- 5.5. CALCULATE CLASS WEIGHTS ---
+print("Calculating class weights for dataset...")
+labels = tokenized_juliet_train["labels"]
+class_weights = compute_class_weight(
+    class_weight='balanced',
+    classes=np.array([0, 1]),
+    y=np.array(labels)
+)
+class_weights_tensor = torch.tensor(class_weights, dtype=torch.float)
+print(f"Class weights: [Non-vulnerable: {class_weights[0]:.4f}, Vulnerable: {class_weights[1]:.4f}]")
 
 # --- 6. LOAD MODEL & APPLY LoRA ---
 print(f"Loading base model '{MODEL_NAME}'...")
-model = RobertaForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+# Create a custom model class to handle class weights
+class WeightedRobertaForSequenceClassification(RobertaForSequenceClassification):
+    def __init__(self, config, class_weights=None):
+        super().__init__(config)
+        self.class_weights = class_weights
+
+    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
+        outputs = super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=None,  # Don't let parent compute loss
+            **kwargs
+        )
+
+        logits = outputs.logits
+        loss = None
+        if labels is not None:
+            loss_fct = torch.nn.CrossEntropyLoss(weight=self.class_weights)
+            loss = loss_fct(logits.view(-1, self.config.num_labels), labels.view(-1))
+
+        return type(outputs)(loss=loss, logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
+
+model = WeightedRobertaForSequenceClassification.from_pretrained(
+    MODEL_NAME,
+    num_labels=2,
+    class_weights=class_weights_tensor
+)
 
 peft_config = LoraConfig(
     task_type=TaskType.SEQ_CLS,
@@ -114,12 +152,13 @@ training_args = TrainingArguments(
     learning_rate=LEARNING_RATE,
     weight_decay=0.01,
     logging_dir="./logs-juliet-lora",
-    logging_steps=100,
+    logging_steps=200,      # Reduced from 100 for faster training
     eval_strategy="steps",
-    eval_steps=500,
-    save_steps=500,
+    eval_steps=1000,        # Reduced from 500 for faster training
+    save_steps=1000,        # Reduced from 500 for faster training
     fp16=True,
     load_best_model_at_end=True,
+    dataloader_num_workers=0,  # Required for Windows
 )
 
 trainer = Trainer(
