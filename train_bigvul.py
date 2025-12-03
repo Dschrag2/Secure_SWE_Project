@@ -11,17 +11,17 @@ from peft import get_peft_model, LoraConfig, TaskType
 from sklearn.utils.class_weight import compute_class_weight
 import numpy as np
 
-# --- 1. CONFIGURATION ---
+# --- Configuration ---
 MODEL_NAME = "microsoft/codebert-base"
-BATCH_SIZE = 24  # Optimized for RTX 3060 (6GB) - balances speed and memory
-LEARNING_RATE = 2e-4 # LoRA usually needs a slightly higher LR than full fine-tuning
+BATCH_SIZE = 24
+LEARNING_RATE = 2e-4
 EPOCHS = 1
 
-# --- 2. LOAD DATASETS (from cache) ---
+# --- Load Datasets (from cache) ---
 print("Loading datasets from cache...")
 bigvul_dataset = load_dataset("bstee615/bigvul", "default")
 
-# --- 3. PREPARE DATASET (The Fix from before) ---
+# --- Prepare Dataset ---
 print("Renaming 'func_before' column to 'code'...")
 bigvul_dataset = bigvul_dataset.rename_column("func_before", "code")
 
@@ -30,7 +30,6 @@ print(f"Loading tokenizer for '{MODEL_NAME}'...")
 tokenizer = RobertaTokenizer.from_pretrained(MODEL_NAME)
 
 def tokenize_function(examples):
-    # We truncate to 512. 
     return tokenizer(
         examples["code"],
         padding="max_length",
@@ -39,8 +38,10 @@ def tokenize_function(examples):
     )
 
 print("Tokenizing Big-Vul dataset (this part still takes a moment)...")
+
 # Process training set
 tokenized_bigvul_train = bigvul_dataset["train"].map(tokenize_function, batched=True)
+
 # Process validation set
 tokenized_bigvul_val = bigvul_dataset["validation"].map(tokenize_function, batched=True)
 
@@ -61,7 +62,7 @@ tokenized_bigvul_val = tokenized_bigvul_val.rename_column("vul", "labels")
 tokenized_bigvul_train.set_format("torch")
 tokenized_bigvul_val.set_format("torch")
 
-# --- 3.5. CALCULATE CLASS WEIGHTS ---
+# --- Caclulate Class Weights ---
 print("Calculating class weights for imbalanced dataset...")
 labels = tokenized_bigvul_train["labels"]
 class_weights = compute_class_weight(
@@ -69,61 +70,54 @@ class_weights = compute_class_weight(
     classes=np.array([0, 1]),
     y=np.array(labels)
 )
-class_weights_tensor = torch.tensor(class_weights, dtype=torch.float)
 print(f"Class weights: [Non-vulnerable: {class_weights[0]:.4f}, Vulnerable: {class_weights[1]:.4f}]")
 
-# --- 4. LOAD MODEL & APPLY LoRA ---
+# --- Load Model and apply LoRA ---
 print(f"Loading base model '{MODEL_NAME}'...")
-# Create a custom model class to handle class weights
-class WeightedRobertaForSequenceClassification(RobertaForSequenceClassification):
-    def __init__(self, config, class_weights=None):
-        super().__init__(config)
-        self.class_weights = class_weights
-
-    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        outputs = super().forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=None,  # Don't let parent compute loss
-            **kwargs
-        )
-
-        logits = outputs.logits
-        loss = None
-        if labels is not None:
-            loss_fct = torch.nn.CrossEntropyLoss(weight=self.class_weights)
-            loss = loss_fct(logits.view(-1, self.config.num_labels), labels.view(-1))
-
-        return type(outputs)(loss=loss, logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
-
-model = WeightedRobertaForSequenceClassification.from_pretrained(
-    MODEL_NAME,
-    num_labels=2,
-    class_weights=class_weights_tensor
-)
+model = RobertaForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
 # Define LoRA Config
 peft_config = LoraConfig(
-    task_type=TaskType.SEQ_CLS, # Sequence Classification
+    task_type=TaskType.SEQ_CLS,
     inference_mode=False,
-    r=8,                        # Rank (Size of adapters). 8 is standard.
-    lora_alpha=32,              # Alpha scaling
+    r=8,
+    lora_alpha=32,
     lora_dropout=0.1,
-    target_modules=["query", "value"], # Apply LoRA to attention layers
+    target_modules=["query", "value"],
     modules_to_save=["classifier"]
 )
 
 # Wrap the model
 model = get_peft_model(model, peft_config)
 model.print_trainable_parameters() 
-# ^ This will print how many params we are training. It should be < 1%.
 
 # Move to GPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
+# --- Training with Class Weights ---
+class WeightedTrainer(Trainer):
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
 
-# --- 5. TRAINING ARGUMENTS ---
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.get("logits")
+
+        # Move class weights to the same device as logits
+        if self.class_weights is not None:
+            weight = torch.tensor(self.class_weights, dtype=torch.float, device=logits.device)
+        else:
+            weight = None
+
+        loss_fct = torch.nn.CrossEntropyLoss(weight=weight)
+        loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
+
+        return (loss, outputs) if return_outputs else loss
+
+# --- Defining Training Arguments ---
 training_args = TrainingArguments(
     output_dir="./results-bigvul-lora",
     num_train_epochs=EPOCHS,
@@ -132,22 +126,24 @@ training_args = TrainingArguments(
     learning_rate=LEARNING_RATE,
     weight_decay=0.01,
     logging_dir="./logs-bigvul-lora",
-    logging_steps=200,      # Reduced from 100 for faster training
+    logging_steps=200,
     eval_strategy="steps",
-    eval_steps=1000,        # Reduced from 500 for faster training
-    save_steps=1000,        # Reduced from 500 for faster training
+    eval_steps=1000,
+    save_steps=1000,
     fp16=True,
     load_best_model_at_end=True,
-    dataloader_num_workers=0,  # Required for Windows
+    dataloader_num_workers=0,
 )
 
-trainer = Trainer(
+trainer = WeightedTrainer(
     model=model,
     args=training_args,
     train_dataset=tokenized_bigvul_train,
     eval_dataset=tokenized_bigvul_val,
+    class_weights=class_weights,
 )
 
+# --- Actually Training the Model ---
 print("--- Starting Fast Fine-Tuning (LoRA + FP16)... ---")
 trainer.train()
 

@@ -1,0 +1,41 @@
+(sec-env) PS C:\Users\dschr\Documents\VSCode\repos\Secure_SWE_Project> python .\Evaluate.py
+--- Loading Datasets ---
+Loading Big-Vul Test Set...
+Loading Juliet Test Set...
+
+========================================================
+ EVALUATING MODEL: ./model-bigvul-lora
+ ON DATASET:       Juliet (Synthetic)
+========================================================
+Tokenizing Juliet (Synthetic)...
+Loading Model...
+Some weights of RobertaForSequenceClassification were not initialized from the model checkpoint at microsoft/codebert-base and are newly initialized: ['classifier.dense.bias', 'classifier.dense.weight', 'classifier.out_proj.bias', 'classifier.out_proj.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+Running Prediction...
+100%|████████████████████████████████████████████████████████████████████████████████| 631/631 [08:22<00:00,  1.26it/s]
+
+--- RESULTS ---
+Accuracy:  0.5911
+Precision: 0.7433
+Recall:    0.2783
+F1 Score:  0.4050
+--------------------------------------------------------
+
+
+========================================================
+ EVALUATING MODEL: ./model-juliet-lora
+ ON DATASET:       Big-Vul (Real-World)
+========================================================
+Tokenizing Big-Vul (Real-World)...
+Loading Model...
+Some weights of RobertaForSequenceClassification were not initialized from the model checkpoint at microsoft/codebert-base and are newly initialized: ['classifier.dense.bias', 'classifier.dense.weight', 'classifier.out_proj.bias', 'classifier.out_proj.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+Running Prediction...
+100%|████████████████████████████████████████████████████████████████████████████████| 517/517 [14:10<00:00,  1.65s/it]
+
+--- RESULTS ---
+Accuracy:  0.9224
+Precision: 0.0770
+Recall:    0.1365
+F1 Score:  0.0984
+--------------------------------------------------------

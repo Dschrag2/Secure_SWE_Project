@@ -10,17 +10,17 @@ from peft import get_peft_model, LoraConfig, TaskType
 from sklearn.utils.class_weight import compute_class_weight
 import numpy as np
 
-# --- 1. CONFIGURATION ---
+# --- Configuration ---
 MODEL_NAME = "microsoft/codebert-base"
-BATCH_SIZE = 24  # Optimized for RTX 3060 (6GB) - balances speed and memory
+BATCH_SIZE = 24
 LEARNING_RATE = 2e-4
 EPOCHS = 1
 
-# --- 2. LOAD DATASETS (from cache) ---
+# --- Load Datasets (from cache) ---
 print("Loading Juliet dataset from cache...")
 juliet_dataset = load_dataset("LorenzH/juliet_test_suite_c_1_3", "default")
 
-# --- 3. RESTRUCTURE DATASET ---
+# --- Restructure Data ---
 print("Restructuring Juliet dataset (flattening 'good' and 'bad' columns)...")
 
 def restructure_function(examples):
@@ -49,9 +49,8 @@ juliet_dataset = juliet_dataset.map(
 
 print(f"Dataset restructured. New columns: {juliet_dataset['train'].column_names}")
 
-# --- 4. CREATE VALIDATION SPLIT (The Fix) ---
-# We split the TRAIN dataset: 90% for training, 10% for validation.
-# This keeps the official 'test' split pure and unseen.
+# --- Create Validation Set ---
+# Split the TRAIN dataset: 90% for training, 10% for validation.
 print("Splitting training set into Train (90%) and Validation (10%)...")
 train_val_split = juliet_dataset["train"].train_test_split(test_size=0.1, seed=42)
 dataset_train = train_val_split["train"]
@@ -61,7 +60,7 @@ print(f"Training samples: {len(dataset_train)}")
 print(f"Validation samples: {len(dataset_val)}")
 
 
-# --- 5. PREPARE TOKENIZER ---
+# --- Prepare Tokenizer ---
 print(f"Loading tokenizer for '{MODEL_NAME}'...")
 tokenizer = RobertaTokenizer.from_pretrained(MODEL_NAME)
 
@@ -85,7 +84,7 @@ tokenized_juliet_val = tokenized_juliet_val.remove_columns(["code"])
 tokenized_juliet_train.set_format("torch")
 tokenized_juliet_val.set_format("torch")
 
-# --- 5.5. CALCULATE CLASS WEIGHTS ---
+# --- Calculate Class Weights ---
 print("Calculating class weights for dataset...")
 labels = tokenized_juliet_train["labels"]
 class_weights = compute_class_weight(
@@ -93,39 +92,13 @@ class_weights = compute_class_weight(
     classes=np.array([0, 1]),
     y=np.array(labels)
 )
-class_weights_tensor = torch.tensor(class_weights, dtype=torch.float)
 print(f"Class weights: [Non-vulnerable: {class_weights[0]:.4f}, Vulnerable: {class_weights[1]:.4f}]")
 
-# --- 6. LOAD MODEL & APPLY LoRA ---
+# --- Load Model and apply LoRA ---
 print(f"Loading base model '{MODEL_NAME}'...")
-# Create a custom model class to handle class weights
-class WeightedRobertaForSequenceClassification(RobertaForSequenceClassification):
-    def __init__(self, config, class_weights=None):
-        super().__init__(config)
-        self.class_weights = class_weights
+model = RobertaForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
-    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        outputs = super().forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=None,  # Don't let parent compute loss
-            **kwargs
-        )
-
-        logits = outputs.logits
-        loss = None
-        if labels is not None:
-            loss_fct = torch.nn.CrossEntropyLoss(weight=self.class_weights)
-            loss = loss_fct(logits.view(-1, self.config.num_labels), labels.view(-1))
-
-        return type(outputs)(loss=loss, logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
-
-model = WeightedRobertaForSequenceClassification.from_pretrained(
-    MODEL_NAME,
-    num_labels=2,
-    class_weights=class_weights_tensor
-)
-
+# Define LoRA Config
 peft_config = LoraConfig(
     task_type=TaskType.SEQ_CLS,
     inference_mode=False,
@@ -139,11 +112,34 @@ peft_config = LoraConfig(
 model = get_peft_model(model, peft_config)
 model.print_trainable_parameters()
 
+# Send model to GPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
 
-# --- 7. TRAINING ARGUMENTS ---
+# --- Training with Class Weights ---
+class WeightedTrainer(Trainer):
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.get("logits")
+
+        # Move class weights to the same device as logits
+        if self.class_weights is not None:
+            weight = torch.tensor(self.class_weights, dtype=torch.float, device=logits.device)
+        else:
+            weight = None
+
+        loss_fct = torch.nn.CrossEntropyLoss(weight=weight)
+        loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
+
+        return (loss, outputs) if return_outputs else loss
+
+# --- Training Arguments ---
 training_args = TrainingArguments(
     output_dir="./results-juliet-lora",
     num_train_epochs=EPOCHS,
@@ -152,22 +148,24 @@ training_args = TrainingArguments(
     learning_rate=LEARNING_RATE,
     weight_decay=0.01,
     logging_dir="./logs-juliet-lora",
-    logging_steps=200,      # Reduced from 100 for faster training
+    logging_steps=200,
     eval_strategy="steps",
-    eval_steps=1000,        # Reduced from 500 for faster training
-    save_steps=1000,        # Reduced from 500 for faster training
+    eval_steps=1000,
+    save_steps=1000,
     fp16=True,
     load_best_model_at_end=True,
-    dataloader_num_workers=0,  # Required for Windows
+    dataloader_num_workers=0,
 )
 
-trainer = Trainer(
+trainer = WeightedTrainer(
     model=model,
     args=training_args,
     train_dataset=tokenized_juliet_train,
     eval_dataset=tokenized_juliet_val,
+    class_weights=class_weights,
 )
 
+# Actually training the model
 print("--- Starting Fast Fine-Tuning on Juliet (LoRA + FP16)... ---")
 trainer.train()
 

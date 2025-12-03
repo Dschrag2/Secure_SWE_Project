@@ -10,13 +10,13 @@ from peft import PeftModel
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 import os
 
-# --- CONFIGURATION ---
+# --- Configuration ---
 BASE_MODEL = "microsoft/codebert-base"
 BIGVUL_ADAPTER_PATH = "./model-bigvul-lora"
 JULIET_ADAPTER_PATH = "./model-juliet-lora"
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 
-# --- METRICS ---
+# --- Evaluation Metrics ---
 def compute_metrics(pred):
     labels = pred.label_ids
     preds = pred.predictions.argmax(-1)
@@ -29,47 +29,48 @@ def compute_metrics(pred):
         'recall': recall
     }
 
-# --- EVALUATION FUNCTION ---
+# --- Evaluation Function ---
 def evaluate_adapter(adapter_path, dataset, dataset_name):
     print(f"\n========================================================")
     print(f" EVALUATING MODEL: {adapter_path}")
     print(f" ON DATASET:       {dataset_name}")
     print(f"========================================================")
     
-    # 1. Load Tokenizer
+    # Load Tokenizer
     try:
         tokenizer = RobertaTokenizer.from_pretrained(adapter_path)
     except:
         print("Warning: Could not load tokenizer from adapter path. Using base tokenizer.")
         tokenizer = RobertaTokenizer.from_pretrained(BASE_MODEL)
 
-    # 2. Tokenize Dataset
+    # Tokenize Dataset
     print(f"Tokenizing {dataset_name}...")
     def tokenize_function(examples):
         return tokenizer(examples["code"], padding="max_length", truncation=True, max_length=512)
-    
     tokenized_dataset = dataset.map(tokenize_function, batched=True)
+
     # Remove raw text column to prevent errors
     tokenized_dataset = tokenized_dataset.remove_columns(["code"])
     tokenized_dataset.set_format("torch")
 
-    # 3. Load Model
+    # Load Model
     print("Loading Model...")
     base_model = RobertaForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=2)
     model = PeftModel.from_pretrained(base_model, adapter_path)
     
+    # Send model to GPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
-    # 4. Run Evaluation
+    # Run Evaluation
     trainer = Trainer(
         model=model,
         args=TrainingArguments(
-            output_dir="./temp_eval_output", 
+            output_dir="./temp_eval_output",
             per_device_eval_batch_size=BATCH_SIZE,
             remove_unused_columns=False,
-            # *** CRITICAL FIX FOR WINDOWS ***
-            dataloader_num_workers=0,  
+            dataloader_num_workers=0,
+            fp16=True,
         ),
         compute_metrics=compute_metrics
     )
@@ -86,26 +87,27 @@ def evaluate_adapter(adapter_path, dataset, dataset_name):
     print("--------------------------------------------------------\n")
     return metrics
 
-# --- MAIN EXECUTION ---
+# --- Main Execution ---
 if __name__ == "__main__":
-    # 1. LOAD DATASETS
+    # Load datasets
     print("--- Loading Datasets ---")
 
-    # A. Big-Vul Test Set
+    # Big-Vul Test Set
     print("Loading Big-Vul Test Set...")
     bigvul_dataset = load_dataset("bstee615/bigvul", "default", split="test")
     bigvul_dataset = bigvul_dataset.rename_column("func_before", "code")
     bigvul_dataset = bigvul_dataset.rename_column("vul", "labels")
+
     # Clean columns
     keep_cols = ['code', 'labels']
     remove_cols = [c for c in bigvul_dataset.column_names if c not in keep_cols]
     bigvul_test = bigvul_dataset.remove_columns(remove_cols)
 
-    # B. Juliet Test Set
+    # Juliet Test Set
     print("Loading Juliet Test Set...")
     juliet_dataset = load_dataset("LorenzH/juliet_test_suite_c_1_3", "default", split="test")
     
-    # Flatten Juliet
+    # Restructure Juliet
     def restructure_juliet(examples):
         new_codes = []
         new_labels = []
@@ -122,7 +124,7 @@ if __name__ == "__main__":
 
     juliet_test = juliet_dataset.map(restructure_juliet, batched=True, remove_columns=juliet_dataset.column_names)
 
-    # 2. RUN EXPERIMENTS
+    # ----- Run Experiments -----
     # Experiment A: Big-Vul Model -> Juliet Data
     if os.path.exists(BIGVUL_ADAPTER_PATH):
         evaluate_adapter(BIGVUL_ADAPTER_PATH, juliet_test, "Juliet (Synthetic)")
