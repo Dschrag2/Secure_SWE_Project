@@ -1,0 +1,77 @@
+{
+  "best_global_step": 1000,
+  "best_metric": 0.041475918143987656,
+  "best_model_checkpoint": "./results-juliet-lora\\checkpoint-1000",
+  "epoch": 0.16520733520568312,
+  "eval_steps": 1000,
+  "global_step": 1000,
+  "is_hyper_param_search": false,
+  "is_local_process_zero": true,
+  "is_world_process_zero": true,
+  "log_history": [
+    {
+      "epoch": 0.03304146704113663,
+      "grad_norm": 4.72982931137085,
+      "learning_rate": 0.00019342474805881382,
+      "loss": 0.435,
+      "step": 200
+    },
+    {
+      "epoch": 0.06608293408227325,
+      "grad_norm": 0.04648420959711075,
+      "learning_rate": 0.00018681645465058652,
+      "loss": 0.107,
+      "step": 400
+    },
+    {
+      "epoch": 0.09912440112340988,
+      "grad_norm": 0.49343162775039673,
+      "learning_rate": 0.00018020816124235918,
+      "loss": 0.0568,
+      "step": 600
+    },
+    {
+      "epoch": 0.1321658681645465,
+      "grad_norm": 2.5422255992889404,
+      "learning_rate": 0.00017359986783413184,
+      "loss": 0.0467,
+      "step": 800
+    },
+    {
+      "epoch": 0.16520733520568312,
+      "grad_norm": 0.0010310417274013162,
+      "learning_rate": 0.0001669915744259045,
+      "loss": 0.0382,
+      "step": 1000
+    },
+    {
+      "epoch": 0.16520733520568312,
+      "eval_loss": 0.041475918143987656,
+      "eval_runtime": 310.0435,
+      "eval_samples_per_second": 52.064,
+      "eval_steps_per_second": 2.171,
+      "step": 1000
+    }
+  ],
+  "logging_steps": 200,
+  "max_steps": 6053,
+  "num_input_tokens_seen": 0,
+  "num_train_epochs": 1,
+  "save_steps": 1000,
+  "stateful_callbacks": {
+    "TrainerControl": {
+      "args": {
+        "should_epoch_stop": false,
+        "should_evaluate": false,
+        "should_log": false,
+        "should_save": true,
+        "should_training_stop": false
+      },
+      "attributes": {}
+    }
+  },
+  "total_flos": 6380065161216000.0,
+  "train_batch_size": 24,
+  "trial_name": null,
+  "trial_params": null
+}
